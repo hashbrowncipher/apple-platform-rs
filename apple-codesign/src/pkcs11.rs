@@ -42,29 +42,54 @@ impl PublicKeyPeerDecrypt for PKCS11Signer {
 
 impl Signer<Signature> for PKCS11Signer {
     fn try_sign(&self, message: &[u8]) -> Result<Signature, signature::Error> {
+        let signature_algorithm = self
+            .cert
+            .signature_algorithm()
+            .ok_or(X509CertificateError::UnknownDigestAlgorithm(
+                "failed to resolve digest algorithm for certificate".into(),
+            ))
+            .map_err(signature::Error::from_source)?;
+
+        // We need to feed the digest into the signing api, not the data to be
+        // digested.
+        let digest_algorithm = signature_algorithm
+            .digest_algorithm()
+            .ok_or(X509CertificateError::UnknownDigestAlgorithm(
+                "unable to resolve digest algorithm from signature algorithm".into(),
+            ))
+            .map_err(signature::Error::from_source)?;
+
+        // Need to apply PKCS#1 padding for RSA.
+        let digest = match signature_algorithm {
+            SignatureAlgorithm::RsaSha256 => digest_algorithm
+                .rsa_pkcs1_encode(message, 1024 / 8)
+                .map_err(signature::Error::from_source)?,
+            _ => todo!(),
+        };
+
         // Implement the signing logic using PKCS11
         let slot = self
             .pkcs11
             .get_slots_with_token()
-            .map_err(|e| signature::Error::from_source(e))?[0];
+            .map_err(signature::Error::from_source)?[0];
         let session = self
             .pkcs11
             .open_rw_session(slot)
-            .map_err(|e| signature::Error::from_source(e))?;
+            .map_err(signature::Error::from_source)?;
         let pin = AuthPin::new("1234".into());
         session
             .login(UserType::User, Some(&pin))
-            .map_err(|e| signature::Error::from_source(e))?;
+            .map_err(signature::Error::from_source)?;
 
         let search = vec![Attribute::Class(ObjectClass::PRIVATE_KEY)];
         let objects = session
             .find_objects(&search)
-            .map_err(|e| signature::Error::from_source(e))?;
+            .map_err(signature::Error::from_source)?;
         for handle in objects {
             println!("found private key");
             let signature = session
                 .sign(&Mechanism::RsaPkcs, handle, message)
-                .map_err(|e| signature::Error::from_source(e))?;
+                .map_err(signature::Error::from_source)?;
             return Ok(signature.into());
         }
 
