@@ -28,6 +28,12 @@ use {
     std::str::FromStr,
 };
 
+#[cfg(feature = "pkcs11")]
+use {
+    crate::pkcs11,
+    cryptoki::context::{CInitializeArgs, Pkcs11},
+};
+
 #[cfg(target_os = "macos")]
 use crate::macos::{keychain_find_code_signing_certificates, KeychainDomain};
 
@@ -645,6 +651,10 @@ pub struct CertificateSource {
         skip_serializing_if = "Option::is_none"
     )]
     pub certificate_der_key: Option<CertificateDerSigningKey>,
+
+    #[command(flatten)]
+    #[serde(default, rename = "pkcs11", skip_serializing_if = "Option::is_none")]
+    pub pkcs11_key: Option<PKCS11SigningKey>,
 }
 
 impl CertificateSource {
@@ -682,6 +692,10 @@ impl CertificateSource {
             res.push(key as &dyn KeySource);
         }
 
+        if let Some(key) = &self.pkcs11_key {
+            res.push(key as &dyn KeySource);
+        }
+
         res
     }
 
@@ -700,6 +714,57 @@ impl CertificateSource {
 
             res.extend(certs);
         }
+
+        Ok(res)
+    }
+}
+
+#[derive(Args, Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PKCS11SigningKey {
+    #[arg(long = "pkcs11-module", value_name = "MODULE_FILENAME")]
+    pub module_filename: Option<String>,
+
+    #[arg(long = "pkcs11-cert", value_name = "PATH")]
+    pub cert_file: Option<PathBuf>,
+}
+
+impl KeySource for PKCS11SigningKey {
+    fn resolve_certificates(&self) -> Result<SigningCertificates, AppleCodesignError> {
+        let module_filename = self.module_filename.as_ref().ok_or_else(|| {
+            AppleCodesignError::CliGeneralError("Missing pkcs11 module filename".into())
+        })?;
+
+        let cert_path = self.cert_file.as_ref().ok_or_else(|| {
+            AppleCodesignError::CliGeneralError("Missing pkcs11 cert filename".into())
+        })?;
+
+        let mut res = SigningCertificates::default();
+        let pem_data = std::fs::read(cert_path)?;
+        let pem = pem::parse(pem_data).map_err(AppleCodesignError::CertificatePem)?;
+        match pem.tag() {
+            "CERTIFICATE" => {
+                res.certs
+                    .push(CapturedX509Certificate::from_der(pem.contents())?);
+            }
+            tag => warn!("(unhandled PEM tag {}; ignoring)", tag),
+        }
+
+        let module_filename = self.module_filename.as_ref().ok_or_else(|| {
+            AppleCodesignError::CliGeneralError("Missing pkcs11 module filename".into())
+        })?;
+
+        let module = Pkcs11::new(module_filename).map_err(|_| {
+            AppleCodesignError::CliGeneralError("opening pkcs11 module failed".into())
+        })?;
+        module.initialize(CInitializeArgs::OsThreads).map_err(|_| {
+            AppleCodesignError::CliGeneralError("pkcs11 module initialization failed".into())
+        })?;
+
+        res.keys.push(Box::new(pkcs11::PKCS11Signer::new(
+            module,
+            res.certs[0].clone(),
+        )));
 
         Ok(res)
     }

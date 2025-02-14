@@ -148,6 +148,7 @@ pub use macho_universal::UniversalBinaryBuilder;
 pub mod notarization;
 #[cfg(feature = "notarize")]
 pub use notarization::*;
+mod pkcs11;
 pub mod plist_der;
 mod policy;
 pub use policy::*;
